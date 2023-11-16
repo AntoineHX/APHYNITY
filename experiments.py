@@ -9,7 +9,7 @@ from utils import CalculateNorm, Logger
 
 import matplotlib
 import matplotlib.pyplot as plt
-matplotlib.use('Agg')
+# matplotlib.use('Agg') # Generate images without having a window appear
 matplotlib.rcParams["figure.dpi"] = 100
 
 _EPSILON = 1e-5
@@ -158,7 +158,7 @@ class LoopExperiment(BaseExperiment):
             max_i=len(self.train)
         )
         for name, value in metrics.items():
-            message += ' | {name}: {value:.2e}'.format(name=name, value=value)
+            message += ' | {name}: {value}'.format(name=name, value=value.item() if isinstance(value, torch.Tensor) else value)
             
         print(message)
 
@@ -167,7 +167,7 @@ class LoopExperiment(BaseExperiment):
 
 
 class APHYNITYExperiment(LoopExperiment):
-    def __init__(self, net, optimizer, min_op, lambda_0, tau_2, niter=1, nupdate=100, nlog=10, **kwargs):
+    def __init__(self, net, optimizer, min_op, lambda_0, tau_2, niter=1, nupdate=100, nlog=10, display=True, **kwargs):
         super().__init__(**kwargs)
 
         self.traj_loss = nn.MSELoss()
@@ -181,6 +181,15 @@ class APHYNITYExperiment(LoopExperiment):
 
         self.nlog = nlog
         self.nupdate = nupdate
+        self.train_history = {'loss_train': np.empty((1,2)), 'loss_test':np.empty((1,2))}
+        self.display = display
+        if self.display:
+            os.makedirs(self.path +'/png')
+            self.fig = plt.figure(figsize=(12, 4), facecolor='white')
+            self.ax_traj = self.fig.add_subplot(131)
+            self.ax_spd = self.fig.add_subplot(132)
+            self.ax_loss = self.fig.add_subplot(133)
+            plt.show(block=False)
     
     def lambda_update(self, loss):
         self._lambda = self._lambda + self.tau_2 * loss
@@ -228,6 +237,12 @@ class APHYNITYExperiment(LoopExperiment):
         return metrics
 
     def run(self):
+        # #Load checkpoint
+        # epoch, loss_test_min = self.load('./exp/pendulum/2023-11-15 11:50:44.826525/model_1.002e-04.pt')
+
+        # self.visualize()
+
+        # return
         loss_test_min = None
         for epoch in range(self.nepoch): 
             for iteration, data in enumerate(self.train, 0):
@@ -238,8 +253,12 @@ class APHYNITYExperiment(LoopExperiment):
                 loss_train = loss['loss'].item()
                 self.lambda_update(loss_train)
 
+                self.train_history['loss_train']= np.append(self.train_history['loss_train'], np.array([[epoch,loss_train]]), axis=0)
+
                 if total_iteration % self.nlog == 0:
                     self.log(epoch, iteration, loss | metric)
+                    if self.display:
+                        self.visualize(title=f'epoch: {epoch}/{self.nepoch}, loss: {loss["loss"].item():.3e}')
 
                 if total_iteration % self.nupdate == 0:
                     with torch.no_grad():
@@ -250,6 +269,8 @@ class APHYNITYExperiment(LoopExperiment):
                             
                         loss_test /= j + 1
 
+                        self.train_history['loss_test']=np.append(self.train_history['loss_test'], np.array([[epoch,loss_test]]), axis=0)
+
                         if loss_test_min == None or loss_test_min > loss_test:
                             loss_test_min = loss_test
                             torch.save({
@@ -257,7 +278,12 @@ class APHYNITYExperiment(LoopExperiment):
                                 'model_state_dict': self.net.state_dict(),
                                 'optimizer_state_dict': self.optimizer.state_dict(),
                                 'loss': loss_test_min, 
-                            }, self.path + f'/model_{loss_test_min:.3e}.pt')
+                            }, self.path + f'/model_{epoch}_{loss_test_min:.3e}.pt')
+
+                            if self.display:
+                                self.visualize(title=f'epoch: {epoch}/{self.nepoch}, loss: {loss_test_min:.3e}',
+                                    save_name=f'model_{epoch}_{loss_test_min:.3e}.png')
+                                
                         loss_test = {
                             'loss_test': loss_test,
                         }
@@ -265,4 +291,62 @@ class APHYNITYExperiment(LoopExperiment):
                         self.log(epoch, iteration, loss_test | metric)
                         print(f'lambda: {self._lambda}')
                         print('#' * 80)
-                        
+
+    def load(self, path):
+        #Load checkpoint
+        checkpoint = torch.load(path)
+        epoch = checkpoint['epoch']
+        self.net.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        loss_test_min = checkpoint['loss'] 
+        return epoch, loss_test_min
+    
+    def visualize(self, title='', save_name=None):
+        with torch.no_grad():
+            self.evaluating()
+
+            data = next(iter(self.test)) 
+            # convert_tensor(data, self.device)
+            target = data['states'][0, :, :].unsqueeze(0) # [batch_size, state, time]
+            t = data['t'][0]
+            y0 = target[:, :, 0]
+            # print(f't:{t.device}, y0:{y0.device}')
+
+            pred = self.net(convert_tensor(y0, self.device), convert_tensor(t, self.device))
+
+            #Title of the plot
+            if title:
+                self.fig.suptitle(title)
+
+            self.ax_traj.cla()
+            self.ax_traj.set_title('Trajectories')
+            self.ax_traj.set_xlabel('t')
+            self.ax_traj.set_ylabel('theta')
+            self.ax_traj.plot(t.cpu().numpy(), target.cpu().numpy()[0, 0, :], 'g-', label='target')
+            self.ax_traj.plot(t.cpu().numpy(), pred.cpu().numpy()[0, 0, :], 'b--', label='pred')
+            self.ax_traj.set_xlim(t.cpu().min(), t.cpu().max())
+            self.ax_traj.legend()
+
+            self.ax_spd.cla()
+            self.ax_spd.set_title('Velocities')
+            self.ax_spd.set_xlabel('t')
+            self.ax_spd.set_ylabel('omega')
+            self.ax_spd.plot(t.cpu().numpy(), target.cpu().numpy()[0, 1, :], 'g-', label='target')
+            self.ax_spd.plot(t.cpu().numpy(), pred.cpu().numpy()[0, 1, :], 'b--', label='pred')
+            self.ax_spd.set_xlim(t.cpu().min(), t.cpu().max())
+            self.ax_spd.legend()
+
+            self.ax_loss.cla()
+            self.ax_loss.set_title('Losses')
+            self.ax_loss.set_xlabel('epoch')
+            self.ax_loss.set_ylabel('loss')
+            self.ax_loss.plot(self.train_history['loss_train'][:,0], self.train_history['loss_train'][:,1], 'g-', label='train')
+            self.ax_loss.plot(self.train_history['loss_test'][:,0], self.train_history['loss_test'][:,1], 'r-', label='test')
+            self.ax_loss.set_xlim(np.min(self.train_history['loss_train'][:,0]), np.max(self.train_history['loss_train'][:,0]))
+            self.ax_loss.set_ylim(0,1e-1)
+            self.ax_loss.legend()
+ 
+            if save_name:
+                plt.savefig(self.path +f'/png/{save_name}')
+            plt.draw()
+            plt.pause(0.001)

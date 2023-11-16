@@ -98,7 +98,7 @@ def train_leads(dataset_name, model_phy_option, model_aug_option, path, device):
     experiment = APHYNITYExperiment(
             train=train, test=test, net=net, optimizer=optimizer, 
             min_op=min_op, lambda_0=lambda_0, tau_2=tau_2, niter=niter, nlog=10,
-            nupdate=100, nepoch=50000, path=path, device=device
+            nupdate=100, nepoch=1000, path=path, device=device
         )
     experiment.run()
 
